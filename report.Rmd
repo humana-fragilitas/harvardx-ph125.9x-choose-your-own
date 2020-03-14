@@ -1,0 +1,295 @@
+---
+title: "HarvardX: PH125.9x Capstone Choose Your Own Project"
+author: "Andrea Blasio"
+date: "March 14th, 2020"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The project described in this document is aimed at solving a machine learning challenge based on a freely chosen dataset available in the public domain as required by the *HarvardX PH125.9x Capstone Choose Your Own* exam; its purpose is to build a model to perform binary classification prediction on the *Biomechanical features of orthopedic patients* dataset distributed by University of California, School of Information and Computer Science (M. Lichman, *[UCI Machine Learning Repository](http://archive.ics.uci.edu/ml)*, 2013) and published by Kaggle in a curated list of materials suitable for training in the data science field.
+
+We will be focusing on the **column2Cweka.csv** set, containing **310** observations related to patients potentially affected by spinal diseases, **100** of which have been classified as *normal* and **210** as *abnormal* based on the features described in the measurements. Given a test subset, our predictive model should allow to accurately perform such binary classification.
+
+The following script loads the dataset:
+
+```{r data_retrieval, warning=FALSE, message=FALSE, results="hide"}
+# Install and attach the required add-on packages
+required_packages <- c("dplyr", "caret", "corrplot", "GGally", "kernlab",
+                       "C50", "klaR", "knitr", "kableExtra", "grid", "gridExtra")
+
+for (package in required_packages) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package) 
+  }
+  library(package, character.only = TRUE)
+}
+
+# Load dataset
+data <- read.csv("./biomechanical-features-of-orthopedic-patients/column_2C_weka.csv",
+                 stringsAsFactors = FALSE)
+
+# Remove temporary variables
+rm(required_packages, package)
+```
+
+# Analysis and data preparation
+
+Each of the **310** observations contains **7 variables**, 6 of which are quantitative continuous values defining spinal features; the latter are then summarized in the *class* variable, containing a qualitative nominal category, that indicates their adherence to either *normal* or *abnormal* patients' subgroups:
+
+```{r glimpse}
+glimpse(data)
+```
+
+```{r list_classes}
+# List of available classes
+unique(data$class)
+```
+
+```{r strints_to_factors}
+# Convert classes expressed as character strings to factors
+data <- data %>% mutate(class = as.factor(class))
+```
+
+```{r summary}
+summary(data)
+```
+
+```{r check_not_available}
+# Check for any not available variables
+anyNA(data)
+```
+
+The *degree_spondylolisthesis* variable is characterized by a mean value that is more than double than its median, highlighting the possible incidence of outliers:
+
+```{r}
+# Draw boxplot to highlight any possible outliers
+# in the degree_spondylolisthesis variable distribution
+boxplot(data$degree_spondylolisthesis,
+        main="Degree of spondylolisthesis",
+        cex.main = 0.8,
+        col="gold")
+```
+
+Outliers are then treated via *mean/median imputation*:
+
+```{r}
+# Reference: K. Ganguly, R Data Analysis Cookbook (2nd edition), Packt, 2017.
+impute_outliers <- function(x, removeNA = TRUE){
+    quantiles <- quantile(x, c(.05, .95), na.rm = removeNA)
+    x[ x < quantiles[1] ] <- mean(x, na.rm = removeNA)
+    x[ x > quantiles[2] ] <- median(x, na.rm = removeNA)
+    x
+}
+
+# Apply mean/median imputation to degree_spondylolisthesis variable
+data$degree_spondylolisthesis <- impute_outliers(data$degree_spondylolisthesis)
+
+# Plot degree_spondylolisthesis variable distribution
+# resulting from mean/median imputation
+boxplot(data$degree_spondylolisthesis,
+        main="Degree of spondylolisthesis \n with mean/median imputation",
+        cex.main = 0.8,
+        col="gold")
+```
+
+Patients with spinal features classified as *abnormal* are more than double than *normal* cases:
+
+```{r normal_vs_abnormal}
+# Patients condition distribution: normal vs. abnormal
+data %>% ggplot(aes(class, fill = class)) +
+  geom_bar(stat = "count") +
+  labs(x = "Patient Classification", y = "Number of patients") +
+  ggtitle("Patients condition distribution: normal vs. abnormal") +
+  theme_minimal()
+```
+
+Visualization of correlation between quantitative values highlights the following:
+
+- *pelvic_radius* has the lowest correlation;
+- highest correlation ratios are respectively found in *pelvic_incidence* in relation to *sacral_slope*, *degree_spondyloisthesis*, *lumbar_lordosis_angle* and *pelvic_tilt.numeric*.
+
+```{r correlations}
+# Plot variables correlation
+M <- cor(data[,1:6])
+corrplot(M, method = "number", tl.cex = 0.8, tl.col = "black")
+```
+
+*Pelvic incidence* appears to also have a slightly higher mean in *abnormal* subjects: 
+
+```{r pelvic_incidence, warning=FALSE, message=FALSE, results="hide"}
+# Plot the pelvic incidence distribution by patients' class
+data %>% 
+ggpairs(columns = c(1, ncol(data)), aes(fill = class)) +
+  ggtitle("Pelvic incidence distribution by patients' class") +
+  theme_minimal()
+```
+
+Data is split in two subsets suitable for respectively training (80%) and testing (20%) the binary classification predictive models:
+
+```{r split_dataset}
+# Split dataset in two subsets for training and validation
+set.seed(100)
+test_index <- createDataPartition(y = data$class, p = 0.2, list = FALSE)
+training_set <- data[-test_index,]
+validation_set <- data[test_index,]
+
+# Remove temporary variables
+rm(test_index)
+```
+
+# Results
+
+Four different algorithms appropriate for classification tasks are employed and estimated in order to build an efficient predictive model: *support vector machines with polynomial kernel* (**svmPoly**), *decision tree* (**C5.0**), *naïve Bayes* (**nb**) and *neural network* (**nnet**); computational nuances of each model are checked via 10-fold cross validation with three repeats.
+
+```{r support_vector_machines_model}
+# Check the computational outcome of each model via 10-fold cross validation
+# with three repeats
+control <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+
+# Model training via support vector machines with polynomial kernel
+svm_model <- train(class~., data = training_set,
+                   method = "svmPoly",
+                   trControl= control,
+                   tuneGrid = data.frame(degree = 1,
+                                         scale = 1,
+                                         C = 1),
+                   preProcess = c("pca","scale","center")
+)
+
+# Predictions outcome
+svm_predictions <- predict(svm_model, validation_set)
+
+# Create confusion matrix
+svm_confusion_matrix <- confusionMatrix(svm_predictions, validation_set$class)
+
+# Store accuracy
+accuracy_summary = tibble(Model = "Support vector machines with polynomial kernel",
+                          Accuracy = svm_confusion_matrix$overall["Accuracy"])
+
+# Print confusion matrix
+svm_confusion_matrix
+```
+
+```{r c5.0_model, warning=FALSE, message=FALSE}
+# Model training via C5.0 (decision tree)
+decision_tree_model <- train(class~., data = training_set, 
+                             method = "C5.0",
+                             preProcess=c("scale", "center"),
+                             trControl= control,
+                             na.action = na.omit,
+                             trace = FALSE
+)
+
+# Predictions outcome
+decision_tree_predictions <- predict(decision_tree_model, validation_set)
+
+# Create confusion matrix
+C50_confusion_matrix <- confusionMatrix(decision_tree_predictions, validation_set$class)
+
+# Store accuracy
+accuracy_summary <- bind_rows(
+  accuracy_summary,
+  tibble(Model = "C5.0 (decision tree)",
+  Accuracy = C50_confusion_matrix$overall["Accuracy"])
+)
+
+# Print confusion matrix
+C50_confusion_matrix
+```
+
+```{r naive_bayes_model, warning = FALSE}
+# Naïve Bayes algorithm
+naive_model <- train(class~., data = training_set,
+                     method = "nb",
+                     preProcess=c("scale","center"),
+                     trControl= control
+)
+
+# Predictions outcome
+naive_predictions <- predict(naive_model, validation_set, na.action = na.pass)
+
+# Create confusion matrix
+naive_bayes_confusion_matrix <- confusionMatrix(naive_predictions, validation_set$class)
+
+accuracy_summary <- bind_rows(
+  accuracy_summary,
+  tibble(Model = "Naïve Bayes",
+  Accuracy = naive_bayes_confusion_matrix$overall["Accuracy"])
+)
+
+naive_bayes_confusion_matrix
+```
+
+```{r neural_network_model}
+# Train model with neural network
+neural_network_model <- train(class~., data = training_set,
+                              method = "nnet",
+                              trControl = control,
+                              preProcess = c("scale","center"),
+                              trace = FALSE
+)
+
+neural_network_predictions <- predict(neural_network_model, validation_set)
+
+# Create confusion matrix
+neural_network_confusion_matrix <- confusionMatrix(neural_network_predictions,
+                                                   validation_set$class)
+
+# Store accuracy
+accuracy_summary <- bind_rows(
+  accuracy_summary,
+  tibble(Model = "Neural network",
+  Accuracy = neural_network_confusion_matrix$overall["Accuracy"])
+)
+
+# Print confusion matrix
+neural_network_confusion_matrix
+```
+
+The *degree_spondylolisthesis* appears to be a relatively good predictor of a patient's class, with *pelvic radius* having a prominent role in the *C5.0* and *neural network* models:
+
+```{r variables_importance_summary}
+
+# Compute the variables importance in each predictive model
+svm_model_importance <- varImp(svm_model, scale = FALSE)
+decision_tree_model_importance <- varImp(decision_tree_model, scale = FALSE)
+naive_model_importance <- varImp(naive_model, scale = FALSE)
+neural_network_importance <- varImp(neural_network_model, scale = FALSE)
+
+# Plot the variables importance in each predictive model
+p1 <- plot(svm_model_importance, main="Support vector machines \n with polynomial kernel ")
+p2 <- plot(decision_tree_model_importance, main="C5.0 (decision tree)")
+p3 <- plot(naive_model_importance, main="Naïve Bayes")
+p4 <- plot(neural_network_importance, main="Neural network")
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+# Conclusion
+
+The **C5.0 (decision tree)** model is by far the most accurate:
+
+```{r accuracy_summary}
+accuracy_summary %>%
+  arrange(desc(Accuracy)) %>%
+  knitr::kable() %>%
+  kable_styling()
+```
+
+Model evaluation could be further sharpened by leveraging *ROC* curves in order to fine tune the binary classification threshold selection and reduce false negative outcomes, which are particularly undesiderable in the medical field.
+
+# Appendix: system configuration and R version
+
+```{r appendix}
+version
+```
